@@ -12,13 +12,14 @@ from typing import (
     Callable,
     Generator,
     Iterator,
-    Type,
     Union,
     TypeVar,
     Generic,
     overload,
     AsyncIterable,
     Awaitable,
+    Protocol,
+    Literal,
 )
 
 from typing_extensions import ParamSpec, Concatenate
@@ -122,7 +123,7 @@ class BaseStream(AsyncIterable[T], Awaitable[T]):
         """
         from .stream import chain
 
-        return chain(self, value)  # type: ignore
+        return chain(self, value)
 
     def __getitem__(self, value: Union[int, slice]) -> BaseStream[T]:
         """Get item protocol.
@@ -131,7 +132,7 @@ class BaseStream(AsyncIterable[T], Awaitable[T]):
         """
         from .stream import getitem
 
-        return getitem(self, value)  # type: ignore
+        return getitem(self, value)
 
     # Disable sync iteration
     # This is necessary because __getitem__ is defined
@@ -174,18 +175,6 @@ class Stream(BaseStream[T], Generic[P, T]):
 
     def __init__(self, *args: P.args, **kwargs: P.kwargs):
         pass
-
-    @classmethod
-    def raw(cls, *args: P.args, **kwargs: P.kwargs) -> AsyncIterator[T]:
-        raise NotImplementedError
-
-    @classmethod
-    def pipe(
-        cls,
-        *args: Q.args,
-        **kwargs: Q.kwargs,
-    ) -> Callable[[AsyncIterable[T]], Stream[Concatenate[AsyncIterable[T], P], T]]:
-        raise NotImplementedError
 
     def stream(self) -> Streamer[T]:
         """Return a streamer context for safe iteration.
@@ -269,25 +258,50 @@ def streamcontext(aiterable: AsyncIterable[T]) -> Streamer[T]:
 
 
 # Operator decorator
+class StreamOperator(Protocol[P, T]):
+    __call__: Callable[P, Stream[P, T]]
+    raw: Callable[P, AsyncIterator[T]]
+
+
+class PipeOperator(StreamOperator[P, T]):
+    pipe: Callable[[AsyncIterable[T]], Stream[Concatenate[AsyncIterable[T], P], T]]
 
 
 @overload
 def operator(
-    func: None = None, *, pipable: bool = False
-) -> Callable[[Callable[P, AsyncIterator[T]]], Type[Stream[P, T]]]:
+    func: None = None, *, pipable: Literal[False] = False
+) -> Callable[[Callable[P, AsyncIterable[T]]], StreamOperator[P, T]]:
     ...
 
 
 @overload
 def operator(
-    func: Callable[P, AsyncIterator[T]], *, pipable: bool = False
-) -> Type[Stream[P, T]]:
+    func: None = None, *, pipable: Literal[True]
+) -> Callable[[Callable[P, AsyncIterable[T]]], PipeOperator[P, T]]:
+    ...
+
+
+@overload
+def operator(
+    func: Callable[P, AsyncIterable[T]], *, pipable: Literal[False] = False
+) -> StreamOperator[P, T]:
+    ...
+
+
+@overload
+def operator(
+    func: Callable[P, AsyncIterable[T]], *, pipable: Literal[True]
+) -> PipeOperator[P, T]:
     ...
 
 
 def operator(
-    func: Callable[P, AsyncIterator[T]] | None = None, *, pipable: bool = False
-) -> Callable[[Callable[P, AsyncIterator[T]]], Type[Stream[P, T]]] | Type[Stream[P, T]]:
+    func: Callable[P, AsyncIterable[T]] | None = None, *, pipable: bool = False
+) -> Union[
+    StreamOperator[P, T],
+    PipeOperator[P, T],
+    Callable[[Callable[P, AsyncIterable[T]]], StreamOperator[P, T]],
+]:
     """Create a stream operator from an asynchronous generator
     (or any function returning an asynchronous iterable).
 
@@ -341,7 +355,7 @@ def operator(
             return multiply.raw(source, 2)
     """
 
-    def decorator(func: Callable[P, AsyncIterator[T]]) -> Type[Stream[P, T]]:
+    def decorator(func: Callable[P, AsyncIterable[T]]) -> StreamOperator[P, T]:
         """Inner decorator for stream operator."""
 
         # First check for classmethod instance, to avoid more confusing errors later on
@@ -411,9 +425,11 @@ def operator(
         init.__module__ = module
         init.__doc__ = f"Initialize the {name} stream."
 
+        pipe = None
+
         if pipable:
             # Raw static method
-            def raw(*args: P.args, **kwargs: P.kwargs) -> AsyncIterator[T]:
+            def raw(*args: P.args, **kwargs: P.kwargs) -> AsyncIterable[T]:
                 if args:
                     assert_async_iterable(args[0])
                 if more_sources_index is not None:
@@ -429,7 +445,7 @@ def operator(
 
             # Pipe class method
             def pipe(
-                cls: Type[Stream[Concatenate[AsyncIterable[T], Q], T]],
+                cls: PipeOperator[Concatenate[AsyncIterable[T], Q], T],
                 /,
                 *args: Q.args,
                 **kwargs: Q.kwargs,
@@ -462,10 +478,10 @@ def operator(
             "__doc__": doc,
             "raw": staticmethod(raw),
             "original": staticmethod(original),
-            "pipe": classmethod(pipe) if pipable else None,
+            "pipe": classmethod(pipe) if pipe is not None else None,
         }
 
         # Create operator class
-        return type(name, bases, attrs)
+        return type(name, bases, attrs)  # type: ignore
 
     return decorator if func is None else decorator(func)

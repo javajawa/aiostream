@@ -102,5 +102,5 @@ async def chunks(source: AsyncIterable[T], n: int) -> AsyncIterator[list[T]]:
     """
     async with streamcontext(source) as streamer:
         async for first in streamer:
-            xs = select.take(create.preserve(streamer), n - 1)
+            xs: AsyncIterable[T] = select.take(create.preserve(streamer), n - 1)
             yield [first] + await aggregate.list(xs)
